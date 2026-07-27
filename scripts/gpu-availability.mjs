@@ -19,10 +19,13 @@ if (!KEY) throw new Error('RUNPOD_API_KEY missing from .env');
 
 const DCS = process.argv.slice(2).length ? process.argv.slice(2) : ['EUR-IS-1', 'EU-RO-1'];
 
+// NOTE: lowestPrice MUST pass secureCloud:true. Without it the API returns the community
+// price, which for several cards (e.g. RTX PRO 4500, communityCloud:false) is a phantom
+// number you can never actually rent at. securePrice is the real on-demand rate.
 async function fetchDc(dc) {
   const query = `query { gpuTypes {
-    id displayName memoryInGb
-    lowestPrice(input:{gpuCount:1, dataCenterId:"${dc}"}) { uninterruptablePrice minimumBidPrice stockStatus }
+    id displayName memoryInGb secureCloud communityCloud securePrice communityPrice
+    lowestPrice(input:{gpuCount:1, dataCenterId:"${dc}", secureCloud:true}) { uninterruptablePrice minimumBidPrice stockStatus }
   } }`;
   const res = await fetch(`https://api.runpod.io/graphql?api_key=${KEY}`, {
     method: 'POST',
@@ -42,7 +45,8 @@ const gpus = new Map();
 for (const dc of DCS) {
   for (const g of byDc[dc]) {
     if (!g.lowestPrice?.stockStatus) continue;
-    if (!gpus.has(g.id)) gpus.set(g.id, { name: g.displayName, vram: g.memoryInGb, dc: {} });
+    if (!gpus.has(g.id))
+      gpus.set(g.id, { name: g.displayName, vram: g.memoryInGb, secure: g.securePrice, dc: {} });
     gpus.get(g.id).dc[dc] = g.lowestPrice;
   }
 }
