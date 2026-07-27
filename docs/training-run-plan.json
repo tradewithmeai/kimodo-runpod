@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "document": {
+    "title": "MDM Reproduction Training Run - Technical Plan",
+    "purpose": "External technical review before launching a ~31h GPU training run",
+    "date": "2026-07-27",
+    "status": "pre_launch_validated",
+    "project": "Kimodo",
+    "repo": "https://github.com/tradewithmeai/kimodo-runpod"
+  },
+
+  "objective": {
+    "primary": "Retrain Motion Diffusion Model (MDM) from scratch on HumanML3D to reproduce the shipped humanml_enc_512_50steps checkpoint",
+    "rationale": "The goal is to validate the training PIPELINE, not to improve the model. Targeting a known-good result yields a pass/fail signal. If the reproduction matches the reference, the pipeline is trustworthy and later experiments inherit that trust. If it diverges, we learn it on a run whose correct answer is already known.",
+    "secondary": "Own a set of weights trained by us from a public dataset, removing dependence on a third-party checkpoint (licensing position)",
+    "non_goals": [
+      "architecture changes",
+      "hyperparameter search",
+      "dataset augmentation",
+      "LLM-in-the-loop prompt work"
+    ]
+  },
+
+  "hardware": {
+    "selected": {
+      "gpu": "NVIDIA GeForce RTX 3090",
+      "vram_gb": 24,
+      "compute_capability": "sm_86",
+      "arch": "Ampere",
+      "provider": "RunPod",
+      "datacenter": "EU-CZ-1",
+      "cloud_type": "SECURE",
+      "interruptible": false,
+      "usd_per_hour": 0.50,
+      "host_vcpu": 32,
+      "host_ram_gb": 125,
+      "pod_id": "8jduto5jf477g1"
+    },
+    "throughput_measured": [
+      {
+        "gpu": "RTX 2070 SUPER",
+        "compute_capability": "sm_75",
+        "seconds_per_step": 0.417,
+        "iterations_per_second": 2.40,
+        "method": "local/profile_train_step.py, batch 64, forward+backward via diffusion.training_losses",
+        "note": "Independently validates against MDM paper's '~3 days on a 2080 Ti': 750000 * 0.417s = 86.8h = 3.6 days"
+      },
+      {
+        "gpu": "RTX 3090",
+        "compute_capability": "sm_86",
+        "seconds_per_step": 0.173,
+        "iterations_per_second": 5.79,
+        "method": "live 383-step training epoch, full training loop including optimizer step and dataloading",
+        "speedup_vs_2070s": 2.41
+      }
+    ],
+    "rejected_alternative": {
+      "option": "80GB-class GPU at $4.99/hr",
+      "estimated_seconds_per_step": 0.09,
+      "estimated_hours": 14,
+      "estimated_cost_usd": 70,
+      "reasons": [
+        "~4x worse value for ~15h saved",
+        "Its real advantage is batch size (512+ vs 64); raising batch size changes gradient noise and requires LR re-tuning, i.e. changes the recipe, defeating the stated objective",
+        "At batch 64 a large card is badly under-utilised; speedup would come only from clock and memory bandwidth, not occupancy"
+      ],
+      "revisit_when": "the next run, where a changed recipe is the point rather than a contaminant"
+    }
+  },
+
+  "cost_projection": {
+    "steps": 600000,
+    "training_compute_hours": 28.8,
+    "training_compute_basis": "600000 steps * 0.173 s/step",
+    "eval_overhead_hours_estimate": [2, 3],
+    "eval_overhead_basis": "measured 75s per save+eval+gen cycle at eval_num_samples=320, eval_rep_times=1; full protocol is 1000 samples * 3 reps = 9.375x eval work; 12 evals total",
+    "eval_overhead_uncertainty": "MDM prints a hardcoded 'Should take about 90 min' warning which, if accurate for the full protocol, would imply 18h of eval overhead instead. Our measurement suggests otherwise but this is the largest uncertainty in the estimate.",
+    "dataset_load_minutes_per_process_start": 3.5,
+    "total_hours_estimate": [31, 32],
+    "total_cost_usd_estimate": [16, 24],
+    "usd_per_hour": 0.50
+  },
+
+  "recipe": {
+    "source": "verbatim from reference checkpoint save/humanml_enc_512_50steps/args.json unless listed in deviations",
+    "architecture": {
+      "arch": "trans_enc",
+      "description": "transformer encoder",
+      "latent_dim": 512,
+      "layers": 8,
+      "num_heads": 4,
+      "ff_size": 1024,
+      "dropout": 0.1,
+      "text_encoder_type": "clip",
+      "clip_model": "ViT-B/32",
+      "clip_frozen": true,
+      "emb_trans_dec": false,
+      "trainable_params_millions": 17.9,
+      "frozen_clip_params_millions": 131.4,
+      "total_params_millions": 169.2
+    },
+    "diffusion": {
+      "diffusion_steps": 50,
+      "noise_schedule": "cosine",
+      "sigma_small": true,
+      "cond_mask_prob": 0.1,
+      "cond_mask_prob_purpose": "enables classifier-free guidance"
+    },
+    "optimisation": {
+      "batch_size": 64,
+      "lr": 1e-4,
+      "weight_decay": 0.0,
+      "adam_beta2": 0.999,
+      "num_steps": 600000,
+      "seed": 10
+    },
+    "loss_weights": {
+      "lambda_vel": 0.0,
+      "lambda_rcxyz": 0.0,
+      "lambda_fc": 0.0,
+      "consequence": "All geometric losses are zero, so the loss is plain MSE on the 263-dim HML vector. Rotation2xyz / SMPL is never invoked in the training math."
+    },
+    "periodic": {
+      "save_interval": 50000,
+      "expected_checkpoints": 12,
+      "log_interval": 1000,
+      "eval_during_training": true,
+      "eval_split": "test",
+      "eval_batch_size": 32,
+      "eval_num_samples": 1000,
+      "eval_rep_times": 3,
+      "gen_during_training": true,
+      "gen_num_samples": 3,
+      "gen_num_repetitions": 2,
+      "gen_guidance_param": 2.5
+    },
+    "launch_command": "python -m train.train_mdm --save_dir /workspace/checkpoints/repro_full --dataset humanml --arch trans_enc --diffusion_steps 50 --noise_schedule cosine --latent_dim 512 --layers 8 --batch_size 64 --lr 1e-4 --weight_decay 0.0 --cond_mask_prob 0.1 --seed 10 --num_steps 600000 --save_interval 50000 --log_interval 1000 --eval_during_training --eval_split test --eval_batch_size 32 --eval_num_samples 1000 --eval_rep_times 3 --gen_during_training --gen_num_samples 3 --gen_num_repetitions 2 --gen_guidance_param 2.5 --train_platform_type TensorboardPlatform --overwrite"
+  },
+
+  "data": {
+    "dataset": "HumanML3D",
+    "train_entries_loaded": 23384,
+    "components": [
+      {
+        "name": "new_joint_vecs/*.npy",
+        "description": "263-dim motion vectors, the training target",
+        "file_count": 29228,
+        "archive_size_gb": 4.30,
+        "source": "Google Drive folder 1OZrTlAGRvLjXhXwnRiOC-oxYry1vf-Uu",
+        "verified_nonempty": true
+      },
+      {
+        "name": "new_joints/*.npy",
+        "description": "22x3 joint positions, used by evaluation",
+        "file_count": 29228,
+        "source": "same Drive folder",
+        "verified_nonempty": true
+      },
+      {
+        "name": "texts/*.txt",
+        "description": "captions",
+        "file_count": 29232,
+        "source": "GitHub EricGuo5513/HumanML3D -> HumanML3D/texts.zip",
+        "note": "NOT present in the Google Drive folder; a common trap"
+      },
+      { "name": "Mean.npy, Std.npy", "description": "normalisation stats", "source": "Drive folder" },
+      { "name": "train.txt, val.txt, test.txt", "description": "split definitions", "source": "Drive folder" }
+    ],
+    "file_count_explanation": "Counts are ~2x the 14616 base motions because HumanML3D ships left-right mirrored copies (M######.npy) as standard augmentation. This is part of the dataset, not duplication introduced by us.",
+    "deliberately_excluded": [
+      { "name": "animations.rar", "size_gb": 2.1, "reason": "preview videos, never read by training" }
+    ],
+    "auxiliary_assets": [
+      { "name": "glove/", "purpose": "tokeniser resources for the eval text encoder", "source": "Drive 1cmXKUT31pqd7_XpJAiWEo1K81TMYHA5n" },
+      { "name": "t2m/", "purpose": "pretrained T2M evaluators for FID / R-precision / diversity", "source": "Drive 1O_GUHgjDbl2tgbyfSwZOUYXDACnk25Kb" },
+      { "name": "body_models/smpl/", "purpose": "SMPL neutral model", "source": "MDM prepare/download_smpl_files.sh" },
+      { "name": "CLIP ViT-B/32", "purpose": "frozen text encoder", "source": "downloaded by OpenAI CLIP package at init" }
+    ]
+  },
+
+  "environment": {
+    "image": "runpod/pytorch:1.1.0-cu1281-torch280-ubuntu2204",
+    "python": "3.12",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "numpy": "2.4.4",
+    "scipy": "1.18.0",
+    "chumpy": "0.71",
+    "spacy": "3.8.14",
+    "venv_path": "/workspace/envs/mdm",
+    "repo_path": "/workspace/repos/motion-diffusion-model",
+    "dataset_path": "/workspace/datasets/HumanML3D",
+    "dataset_symlink": "repo/dataset/HumanML3D -> /workspace/datasets/HumanML3D",
+    "checkpoint_path": "/workspace/checkpoints/repro_full",
+    "persistence": "All dependencies live on a 200GB RunPod network volume, so pod loss destroys only the running process, not the environment",
+    "undeclared_deps_discovered": ["spacy", "joblib", "moviepy<2", "imageio-ffmpeg", "tensorboard", "wandb", "rarfile"]
+  },
+
+  "deviations_from_reference": [
+    {
+      "id": 1,
+      "item": "train_platform_type",
+      "reference": "WandBPlatform",
+      "ours": "TensorboardPlatform",
+      "affects_training_math": false,
+      "justification": "Logging backend only. Avoids a third-party account dependency and keeps metrics on our volume.",
+      "severity": "benign"
+    },
+    {
+      "id": 2,
+      "item": "num_steps",
+      "reference": "args.json records 600000; the shipped checkpoint file is named model000750000.pt",
+      "ours": 600000,
+      "affects_training_math": true,
+      "justification": "Unresolved discrepancy. The reference may have been resumed and extended beyond its recorded config. We follow the recorded config.",
+      "severity": "material",
+      "see": "open_questions[1]"
+    },
+    {
+      "id": 3,
+      "item": "library versions",
+      "reference": "2022-era: torch 1.7, Python 3.7, CUDA 11.0",
+      "ours": "torch 2.8, Python 3.12, CUDA 12.8",
+      "affects_training_math": "possibly",
+      "justification": "The original environment is not installable on modern CUDA/sm_86. This is the single largest source of possible numerical divergence.",
+      "severity": "material_unavoidable"
+    },
+    {
+      "id": 4,
+      "item": "scipy sqrtm compatibility patch",
+      "files": ["data_loaders/humanml/utils/metrics.py", "eval/a2m/stgcn/fid.py", "eval/a2m/action2motion/fid.py"],
+      "change": "linalg.sqrtm(X, disp=False) -> _sq = linalg.sqrtm(X); covmean = _sq[0] if isinstance(_sq, tuple) else _sq",
+      "affects_training_math": false,
+      "justification": "scipy >=1.18 removed the disp kwarg. Old API returned (matrix, errest), new returns the matrix. Handles both; mathematically identical. Affects evaluation only, not training.",
+      "severity": "benign"
+    },
+    {
+      "id": 5,
+      "item": "matplotlib tostring_rgb compat shim",
+      "files": ["data_loaders/humanml/utils/plot_script.py"],
+      "change": "Restore FigureCanvasAgg.tostring_rgb from buffer_rgba (drop alpha) when absent",
+      "affects_training_math": false,
+      "justification": "matplotlib >=3.10 removed tostring_rgb, which moviepy 1.x calls in mplfig_to_npimage. Pixel-identical. Downgrading matplotlib is not viable because <3.8 does not support numpy 2. Affects sample rendering only.",
+      "severity": "benign"
+    }
+  ],
+
+  "preparation_gotchas_solved": [
+    {
+      "id": "rar5_silent_data_loss",
+      "severity": "critical",
+      "symptom": "ValueError: not enough values to unpack (expected 2, got 0) at dataset.py:289 - an error naming nothing relevant",
+      "root_cause": "p7zip 16.02 (Ubuntu 22.04 default) cannot read RAR5. It exits 0 and creates all 29228 entries as 0-byte files. The dataset loader then swallows every resulting EOFError in a bare 'except: pass', leaving new_name_list empty.",
+      "also_failed": "bsdtar/libarchive extracted ~9912 files then failed with 'Unsupported block header size'",
+      "fix": "official RARLab unrar 7.12 from rarlab.com",
+      "verification": "find new_joint_vecs -name '*.npy' -size 0 | wc -l  must equal 0"
+    },
+    {
+      "id": "captions_not_in_drive",
+      "severity": "high",
+      "symptom": "texts/ directory absent after downloading the Drive folder",
+      "fix": "clone EricGuo5513/HumanML3D and unzip HumanML3D/texts.zip"
+    },
+    {
+      "id": "chumpy_python312",
+      "severity": "high",
+      "symptom": "ModuleNotFoundError: No module named 'chumpy' when smplx unpickles SMPL_NEUTRAL.pkl",
+      "root_cause": "chumpy setup.py does 'import pip', which fails under pip build isolation",
+      "fix": "pip install --no-build-isolation git+https://github.com/mattloper/chumpy",
+      "note": "Installs and imports cleanly as 0.71 on Python 3.12. This also retires the Rotation2xyz stub previously used in our inference server."
+    }
+  ],
+
+  "preflight_validation": {
+    "purpose": "Exercise the eval + generation + save code paths that only fire at save_interval, at tiny scale, so the 29h run cannot die at step 50000",
+    "config_delta": { "num_steps": 60, "save_interval": 50, "eval_num_samples": 320, "eval_rep_times": 1, "gen_num_repetitions": 1 },
+    "result": "PASS (rc=0, zero errors)",
+    "bugs_caught_that_would_have_killed_the_full_run": [
+      "scipy sqrtm disp kwarg removal (deviation 4)",
+      "matplotlib tostring_rgb removal (deviation 5)"
+    ],
+    "artifacts_verified": [
+      "checkpoints (model + optimizer state) written at every save_interval",
+      "eval_humanml_*.log written per eval",
+      "TensorBoard event files written",
+      "samples_00_to_02.mp4 renders produced",
+      "results.npy / results.txt written"
+    ],
+    "sanity_metrics_observed": {
+      "ground_truth_matching_score": 3.2314,
+      "ground_truth_r_precision_top1": 0.4481,
+      "ground_truth_r_precision_top2": 0.6537,
+      "ground_truth_r_precision_top3": 0.7718,
+      "ground_truth_fid": 0.0010,
+      "ground_truth_diversity": 9.5230,
+      "untrained_model_fid": 41.94,
+      "untrained_model_r_precision_top1": 0.0281,
+      "untrained_model_diversity": 1.1637,
+      "interpretation": "Ground-truth values match published HumanML3D figures, confirming the evaluators loaded correctly. The untrained (step 0) model scores appropriately random, confirming the eval discriminates."
+    },
+    "training_sanity": {
+      "loss_at_step_375": 0.38367,
+      "loss_quartiles_at_step_350": { "q0": 0.270, "q1": 0.279, "q2": 0.318, "q3": 0.675 },
+      "interpretation": "Plausible early-training values; loss decreasing; higher loss at high-noise quartile q3 is expected"
+    }
+  },
+
+  "risks": [
+    {
+      "risk": "Crash at first save_interval because eval/gen paths untested",
+      "severity": "high",
+      "status": "MITIGATED",
+      "mitigation": "Pre-flight validation run passed; caught 2 real bugs"
+    },
+    {
+      "risk": "Pod terminated or lost mid-run",
+      "severity": "high",
+      "mitigation": "Checkpoints (model + optimizer state) every 50000 steps to the network volume; resume with --resume_checkpoint. On-demand (non-interruptible) instance chosen specifically to reduce this."
+    },
+    {
+      "risk": "SSH disconnect kills the process",
+      "severity": "high",
+      "mitigation": "Launched under setsid nohup, fully detached; verified across all prior long-running jobs in this project"
+    },
+    {
+      "risk": "Numerical divergence from reference due to 4-year library version gap",
+      "severity": "medium",
+      "mitigation": "Cannot be eliminated. Detected by acceptance criteria - this is precisely what the run is designed to surface."
+    },
+    {
+      "risk": "Disk exhaustion",
+      "severity": "low",
+      "quantified": "12 checkpoints * 225MB (81.8MB model + 143MB optimizer) = 2.7GB, plus sample renders. Volume is 200GB with ~195GB free."
+    },
+    {
+      "risk": "Cost overrun from idle finished pod",
+      "severity": "medium",
+      "quantified": "$0.50/hr = $12/day if forgotten",
+      "mitigation": "Known run duration (~31h); check on completion and stop the pod"
+    },
+    {
+      "risk": "RTX 3090 unavailable on pod recreate",
+      "severity": "medium",
+      "detail": "3090 stock is Low and EU-CZ-1 is the only datacenter carrying it (network volume is datacenter-locked). Fallback is RTX 4090 at $0.69/hr, which would change step timing."
+    }
+  ],
+
+  "execution": {
+    "launch": "setsid nohup, detached, logging to /workspace/train_full.log",
+    "monitoring": [
+      "grep 'step\\[' /workspace/train_full.log | tail  - loss trajectory",
+      "checkpoint files appearing every 50000 steps",
+      "TensorBoard event files on the volume"
+    ],
+    "checkpoint_retention": "keep all 12 - they are the evidence of the loss curve and allow post-hoc evaluation at any point in training",
+    "on_completion": ["stop the pod", "back up checkpoints", "run acceptance tests"]
+  },
+
+  "acceptance_criteria": {
+    "note": "The run is a TEST, so it needs a defined pass condition",
+    "quantitative_primary": {
+      "method": "Compare final-checkpoint T2M evaluator metrics against the reference checkpoint, evaluated identically on the test split",
+      "metrics": ["FID", "R-precision top-1/2/3", "Diversity", "MultiModality"],
+      "proposed_tolerance": { "fid_relative": 0.10, "r_precision_absolute": 0.02 },
+      "tolerance_confidence": "LOW - this is a guess and is open_questions[0]. Diffusion training has run-to-run variance even at fixed seed (cuDNN non-determinism, different library versions)."
+    },
+    "qualitative_secondary": "Generate a fixed prompt set through both our checkpoint and the reference; compare behavioural equivalence in the viewer",
+    "diagnostic_continuous": "Loss curve shape should track the reference trajectory",
+    "confound_handling": "If our 600k result underperforms the reference, the most likely explanation is that the reference had 150k more steps, not that our pipeline is broken. Evaluating our own 550k checkpoint against our 600k one will show whether the curve had flattened - if it had, step count is not the explanation and something else differs."
+  },
+
+  "open_questions": [
+    {
+      "id": 0,
+      "question": "What FID / R-precision deltas should count as a successful reproduction, given a 4-year library-version gap?",
+      "current_plan": "±10% FID, ±0.02 absolute R-precision",
+      "confidence": "low"
+    },
+    {
+      "id": 1,
+      "question": "600k (recorded config) or 750k (shipped checkpoint filename) steps?",
+      "current_plan": "600k",
+      "cost_delta": "+$4 and +7h for 750k"
+    },
+    {
+      "id": 2,
+      "question": "Set torch.use_deterministic_algorithms(True) and cudnn.deterministic?",
+      "current_plan": "no, matching the reference",
+      "tradeoff": "costs throughput but makes the run exactly re-runnable"
+    },
+    {
+      "id": 3,
+      "question": "Is 12 full evals (1000 samples x 3 reps) the right cadence, or reduce eval_rep_times to 1 during training and do the full 3-rep evaluation once post-hoc from saved checkpoints?",
+      "current_plan": "full fidelity, 12 x (1000 x 3), per operator instruction not to cut corners"
+    },
+    {
+      "id": 4,
+      "question": "Are any of the 5 listed deviations material rather than benign?",
+      "current_plan": "deviations 1, 4, 5 assessed benign; 2 and 3 assessed material"
+    }
+  ]
+}
