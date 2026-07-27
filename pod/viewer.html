@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kimodo — Motion Viewer</title>
+<style>
+  :root {
+    --bg: #0e1113; --panel: #171b1f; --line: #272d33;
+    --text: #e6eaed; --muted: #8b969f; --accent: #5ac8fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); overflow: hidden;
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #stage { position: fixed; inset: 0; }
+  #panel {
+    position: fixed; top: 16px; left: 16px; width: 330px; max-width: calc(100vw - 32px);
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    border: 1px solid var(--line); border-radius: 10px; padding: 14px;
+    backdrop-filter: blur(8px); z-index: 10;
+  }
+  h1 { font-size: 13px; margin: 0 0 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  textarea, input, button, select {
+    font: inherit; color: var(--text); background: #0f1316;
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; width: 100%;
+  }
+  textarea { resize: vertical; min-height: 62px; }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row > label { flex: 1; font-size: 12px; color: var(--muted); }
+  .row input { margin-top: 3px; }
+  button {
+    margin-top: 10px; cursor: pointer; background: var(--accent); color: #04222e;
+    border: none; font-weight: 600; padding: 10px;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+  #status { margin-top: 10px; font-size: 12px; color: var(--muted); min-height: 1.5em; }
+  #status.err { color: #ff8080; }
+  #examples { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  #examples button { margin: 0; width: auto; padding: 4px 9px; font-size: 12px; background: #1d2429; color: var(--muted); font-weight: 500; }
+  #examples button:hover { color: var(--text); }
+  #transport { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px; display: none; align-items: center; gap: 12px;
+    backdrop-filter: blur(8px); z-index: 10; max-width: calc(100vw - 32px); }
+  #transport.on { display: flex; }
+  #scrub { width: 260px; }
+  #frameno { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 74px; }
+  #transport button { margin: 0; width: auto; padding: 6px 12px; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="panel">
+  <h1>Text → Motion</h1>
+  <textarea id="prompt" placeholder="a person walks forward and waves">a person walks forward and waves</textarea>
+  <div class="row">
+    <label>Seconds <input id="seconds" type="number" value="6" min="1" max="9.8" step="0.5"></label>
+    <label>Guidance <input id="guidance" type="number" value="2.5" min="1" max="10" step="0.5"></label>
+  </div>
+  <button id="go">Generate</button>
+  <div id="examples"></div>
+  <div id="status">Checking model…</div>
+</div>
+
+<div id="transport">
+  <button id="play" class="ghost">Pause</button>
+  <input id="scrub" type="range" min="0" max="0" value="0">
+  <span id="frameno">0 / 0</span>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const stage = document.getElementById('stage');
+const statusEl = document.getElementById('status');
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1113);
+scene.fog = new THREE.Fog(0x0e1113, 8, 26);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(3.2, 1.9, 4.2);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+stage.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.9, 0);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xcfe6ff, 0x20262b, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 1.4);
+key.position.set(4, 8, 5);
+scene.add(key);
+
+const grid = new THREE.GridHelper(40, 40, 0x35414a, 0x1e252b);
+scene.add(grid);
+
+// --- skeleton -------------------------------------------------------------
+// Rebuilt whenever a new clip arrives, since joint count is fixed but chains come
+// from the server alongside the motion data.
+let motion = null;      // { fps, frames, joints:[f][j][3], chains }
+let jointMeshes = [];
+let boneLines = [];
+const skeleton = new THREE.Group();
+scene.add(skeleton);
+
+const CHAIN_COLORS = [0x5ac8fa, 0x5ac8fa, 0xe6eaed, 0xffb35a, 0xffb35a];
+
+function buildSkeleton(data) {
+  skeleton.clear();
+  jointMeshes = [];
+  boneLines = [];
+
+  const jointGeo = new THREE.SphereGeometry(0.028, 12, 12);
+  const jointMat = new THREE.MeshStandardMaterial({ color: 0xe6eaed, roughness: 0.5 });
+  for (let j = 0; j < data.joints[0].length; j++) {
+    const m = new THREE.Mesh(jointGeo, jointMat);
+    skeleton.add(m);
+    jointMeshes.push(m);
+  }
+
+  data.chains.forEach((chain, ci) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(chain.length * 3), 3));
+    const mat = new THREE.LineBasicMaterial({ color: CHAIN_COLORS[ci % CHAIN_COLORS.length] });
+    const line = new THREE.Line(geo, mat);
+    line.frustumCulled = false;
+    skeleton.add(line);
+    boneLines.push({ line, chain });
+  });
+}
+
+function applyFrame(f) {
+  if (!motion) return;
+  const pose = motion.joints[f];
+  // MDM is Y-up with Z forward, which matches three.js closely enough to use directly.
+  for (let j = 0; j < pose.length; j++) {
+    jointMeshes[j].position.set(pose[j][0], pose[j][1], pose[j][2]);
+  }
+  for (const { line, chain } of boneLines) {
+    const arr = line.geometry.attributes.position.array;
+    chain.forEach((j, i) => {
+      arr[i * 3] = pose[j][0];
+      arr[i * 3 + 1] = pose[j][1];
+      arr[i * 3 + 2] = pose[j][2];
+    });
+    line.geometry.attributes.position.needsUpdate = true;
+    line.geometry.computeBoundingSphere();
+  }
+}
+
+// --- playback -------------------------------------------------------------
+const transport = document.getElementById('transport');
+const scrub = document.getElementById('scrub');
+const frameno = document.getElementById('frameno');
+const playBtn = document.getElementById('play');
+
+let playing = true;
+let frame = 0;
+let acc = 0;
+let last = performance.now();
+
+playBtn.onclick = () => {
+  playing = !playing;
+  playBtn.textContent = playing ? 'Pause' : 'Play';
+};
+scrub.oninput = () => {
+  playing = false;
+  playBtn.textContent = 'Play';
+  frame = +scrub.value;
+  applyFrame(frame);
+  updateCounter();
+};
+
+function updateCounter() {
+  frameno.textContent = `${frame + 1} / ${motion ? motion.frames : 0}`;
+}
+
+function tick(now) {
+  requestAnimationFrame(tick);
+  const dt = (now - last) / 1000;
+  last = now;
+
+  if (motion && playing) {
+    acc += dt;
+    const step = 1 / motion.fps;
+    while (acc >= step) {
+      acc -= step;
+      frame = (frame + 1) % motion.frames;
+      applyFrame(frame);
+      scrub.value = frame;
+      updateCounter();
+    }
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(tick);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// --- generation -----------------------------------------------------------
+const go = document.getElementById('go');
+
+async function generate() {
+  const text = document.getElementById('prompt').value.trim();
+  if (!text) return;
+  go.disabled = true;
+  statusEl.className = '';
+  statusEl.textContent = 'Sampling on the 3090…';
+
+  try {
+    const res = await fetch('/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        seconds: +document.getElementById('seconds').value,
+        guidance: +document.getElementById('guidance').value,
+      }),
+    });
+    if (!res.ok) throw new Error(`server returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const data = await res.json();
+
+    motion = data;
+    buildSkeleton(data);
+    frame = 0;
+    scrub.max = data.frames - 1;
+    scrub.value = 0;
+    applyFrame(0);
+    updateCounter();
+    transport.classList.add('on');
+    playing = true;
+    playBtn.textContent = 'Pause';
+    statusEl.textContent = `${data.frames} frames @ ${data.fps}fps — generated in ${data.elapsed_sec}s`;
+  } catch (err) {
+    statusEl.className = 'err';
+    statusEl.textContent = err.message;
+  } finally {
+    go.disabled = false;
+  }
+}
+go.onclick = generate;
+
+const EXAMPLES = [
+  'a person walks forward and waves',
+  'a person jumps over an obstacle',
+  'a person sits down on a chair',
+  'a person runs in a circle',
+  'a person throws a ball',
+  'a person walks up stairs',
+];
+const exWrap = document.getElementById('examples');
+for (const ex of EXAMPLES) {
+  const b = document.createElement('button');
+  b.textContent = ex;
+  b.onclick = () => { document.getElementById('prompt').value = ex; generate(); };
+  exWrap.appendChild(b);
+}
+
+fetch('/health')
+  .then(r => r.json())
+  .then(h => {
+    statusEl.textContent = h.ready
+      ? `Ready — ${h.device}, ${h.steps} diffusion steps.`
+      : 'Model still loading…';
+  })
+  .catch(() => { statusEl.className = 'err'; statusEl.textContent = 'Server unreachable.'; });
+</script>
+</body>
+</html>
