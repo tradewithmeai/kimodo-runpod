@@ -121,6 +121,21 @@ Anything outside `/workspace` is on the 50 GB container disk and is **lost on re
 - **Terminate** only to release the card for good; the volume survives either way.
 - Volume storage (~$14/mo) bills continuously and is the only cost when no pod exists.
 
+## Persistence across pod loss
+
+Pods are fully disposable. Everything needed to serve lives on the network volume:
+weights, the `mdm` venv, `/workspace/app`, and `/workspace/onstart.sh` (the idempotent
+launcher). `scripts/pod-create.mjs` now does the whole recovery in one command:
+
+```
+node scripts/pod-create.mjs
+```
+
+creates the pod → waits for SSH → rewrites the `Host kimodo` block in `~/.ssh/config` →
+runs `onstart.sh` over SSH → polls the public `/health` endpoint until the server reports
+ready → prints the new viewer URL. The proxy URL changes with the pod id on every
+recreation; the local deployment in `local/` is unaffected by any of this.
+
 ## Status
 
 - [x] Network volume created (EU-CZ-1)

@@ -129,19 +129,82 @@ console.log(`\ncreated: ${pod.name} (${pod.id}) at $${pod.costPerHr}/hr — bill
 // 4. Wait for SSH. Port mappings only appear on the GraphQL runtime object; REST
 //    returns portMappings:null even once the pod is up.
 process.stdout.write('waiting for ssh');
-for (let i = 0; i < 40; i++) {
+let ssh = null;
+for (let i = 0; i < 40 && !ssh; i++) {
   const d = await gql(
     `query { pod(input:{podId:"${pod.id}"}) { runtime { ports { ip isIpPublic privatePort publicPort } } } }`
   );
-  const ssh = (d.pod?.runtime?.ports ?? []).find((p) => p.privatePort === 22 && p.isIpPublic);
-  if (ssh) {
-    console.log(`\n\nssh -i ~/.ssh/<your-runpod-key> -p ${ssh.publicPort} root@${ssh.ip}`);
-    console.log(`viewer (once the server is running): https://${pod.id}-8888.proxy.runpod.net`);
-    console.log('\nUpdate the Host kimodo block in ~/.ssh/config with the address above.');
-    console.log('Start the motion server with: ssh kimodo /workspace/run_server.sh');
-    process.exit(0);
+  ssh = (d.pod?.runtime?.ports ?? []).find((p) => p.privatePort === 22 && p.isIpPublic) ?? null;
+  if (!ssh) {
+    process.stdout.write('.');
+    await new Promise((r) => setTimeout(r, 5000));
   }
+}
+if (!ssh) {
+  console.log('\n\nPod created but SSH did not come up in ~3 minutes. Check: node scripts/pod-status.mjs');
+  process.exit(1);
+}
+console.log(`\nssh up at ${ssh.ip}:${ssh.publicPort}`);
+
+// 5. Rewrite the Host kimodo block in ~/.ssh/config so `ssh kimodo` works immediately.
+const { execFileSync } = await import('node:child_process');
+const { readFileSync: rf, writeFileSync: wf } = await import('node:fs');
+const os = await import('node:os');
+const sshConfigPath = `${os.homedir()}/.ssh/config`;
+try {
+  const cfg = rf(sshConfigPath, 'utf8');
+  const updated = cfg.replace(
+    /(Host kimodo\r?\n(?:[ \t]+\S.*\r?\n)*)/,
+    (block) =>
+      block
+        .replace(/([ \t]+HostName[ \t]+)\S+/, `$1${ssh.ip}`)
+        .replace(/([ \t]+Port[ \t]+)\S+/, `$1${ssh.publicPort}`)
+  );
+  if (updated !== cfg) {
+    wf(sshConfigPath, updated);
+    console.log('~/.ssh/config Host kimodo block updated');
+  } else {
+    console.log('no Host kimodo block found in ~/.ssh/config — update it manually');
+  }
+} catch (e) {
+  console.log(`could not update ssh config (${e.message}) — update it manually`);
+}
+
+// 6. Launch the motion server from the volume and wait for the public health endpoint.
+//    Everything it needs (venv, weights, app) lives on the volume, so this is the only
+//    boot step — the pod is fully disposable.
+// execFileSync with an argument array — ip/port come from the API response, and this
+// keeps shell metacharacters inert no matter what the API returns.
+const sshArgs = [
+  '-o', 'StrictHostKeyChecking=accept-new',
+  '-o', 'IdentitiesOnly=yes',
+  '-i', `${os.homedir()}/.ssh/id_ed25519_runpod`,
+  '-p', String(ssh.publicPort),
+  `root@${ssh.ip}`,
+  'bash /workspace/onstart.sh',
+];
+try {
+  const out = execFileSync('ssh', sshArgs, { encoding: 'utf8', timeout: 60000 });
+  console.log(out.trim());
+} catch (e) {
+  console.log(`onstart failed over ssh: ${e.message}`);
+  process.exit(1);
+}
+
+const healthUrl = `https://${pod.id}-8888.proxy.runpod.net/health`;
+process.stdout.write('waiting for motion server');
+for (let i = 0; i < 40; i++) {
+  try {
+    const h = await (await fetch(healthUrl, { signal: AbortSignal.timeout(5000) })).json();
+    if (h.ready) {
+      console.log(`\n\nREADY — server on ${h.device}`);
+      console.log(`viewer: https://${pod.id}-8888.proxy.runpod.net`);
+      console.log(`ssh:    ssh kimodo`);
+      process.exit(0);
+    }
+  } catch {}
   process.stdout.write('.');
   await new Promise((r) => setTimeout(r, 5000));
 }
-console.log('\n\nPod created but SSH did not come up in ~3 minutes. Check: node scripts/pod-status.mjs');
+console.log('\n\nServer did not report ready in ~3 minutes. Check: ssh kimodo "tail /workspace/server.log"');
+process.exit(1);
