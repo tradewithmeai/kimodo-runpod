@@ -232,7 +232,9 @@ async function generate() {
   try {
     const res = await fetch('/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // ngrok-skip-browser-warning bypasses the free-tier interstitial, which would
+      // otherwise return an HTML warning page instead of JSON when shared over a tunnel.
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({
         text,
         seconds: +document.getElementById('seconds').value,
@@ -278,7 +280,7 @@ for (const ex of EXAMPLES) {
   exWrap.appendChild(b);
 }
 
-fetch('/health')
+fetch('/health', { headers: { 'ngrok-skip-browser-warning': 'true' } })
   .then(r => r.json())
   .then(h => {
     statusEl.textContent = h.ready

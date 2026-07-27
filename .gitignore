@@ -39,3 +39,4 @@ desktop.ini
 local/venv/
 local/motion-diffusion-model/
 local/server.log
+local/ngrok.log
