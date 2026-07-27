@@ -122,17 +122,31 @@
     },
     "periodic": {
       "save_interval": 50000,
-      "expected_checkpoints": 12,
+      "expected_checkpoints": 14,
+      "expected_checkpoints_correction": "Previously stated as 12. Verified from training_loop.py: saves fire when total_step() % save_interval == 0, which for steps 0..600161 gives 13 saves (0, 50k, ..., 600k inclusive), plus a final save because (600161-1) % 50000 = 160 != 0. Total 14 saves and 14 evaluations.",
       "log_interval": 1000,
       "eval_during_training": true,
       "eval_split": "test",
       "eval_batch_size": 32,
       "eval_num_samples": 1000,
       "eval_rep_times": 3,
+      "eval_metrics_computed_during_training": ["Matching Score", "R-precision", "FID", "Diversity"],
+      "eval_metrics_NOT_computed_during_training": ["MultiModality"],
+      "multimodality_note": "run_mm=False is hardcoded at training_loop.py:263, so MultiModality is never computed during training. The 'MultiModality Summary' header still prints but emits no values and no key appears in the results dict. It MUST be evaluated post-hoc from a saved checkpoint if wanted.",
       "gen_during_training": true,
       "gen_num_samples": 3,
       "gen_num_repetitions": 2,
       "gen_guidance_param": 2.5
+    },
+    "num_steps_semantics": {
+      "finding": "num_steps does NOT terminate the training loop. It is used only to compute num_epochs = num_steps // len(data) + 1, and the loop then runs that many COMPLETE epochs. The only in-loop break is on lr_anneal_steps, which is unset.",
+      "source": "train/training_loop.py run_loop()",
+      "batches_per_epoch": 383,
+      "computed_num_epochs": 1567,
+      "actual_total_steps_expected": 600161,
+      "overshoot_vs_num_steps": 161,
+      "corroborating_evidence": "The pre-flight validation was launched with num_steps=60 and ran to step 383 - exactly one full epoch - confirming the loop ignores num_steps as a stopping condition.",
+      "resume_behaviour": "num_epochs is computed from num_steps alone and IGNORES resume_step, while total_step() = step + resume_step. So on a resume, num_steps behaves as ADDITIONAL steps layered on top of the resumed position."
     },
     "launch_command": "python -m train.train_mdm --save_dir /workspace/checkpoints/repro_full --dataset humanml --arch trans_enc --diffusion_steps 50 --noise_schedule cosine --latent_dim 512 --layers 8 --batch_size 64 --lr 1e-4 --weight_decay 0.0 --cond_mask_prob 0.1 --seed 10 --num_steps 600000 --save_interval 50000 --log_interval 1000 --eval_during_training --eval_split test --eval_batch_size 32 --eval_num_samples 1000 --eval_rep_times 3 --gen_during_training --gen_num_samples 3 --gen_num_repetitions 2 --gen_guidance_param 2.5 --train_platform_type TensorboardPlatform --overwrite"
   },
@@ -379,8 +393,12 @@
     {
       "id": 1,
       "question": "600k (recorded config) or 750k (shipped checkpoint filename) steps?",
-      "current_plan": "600k",
-      "cost_delta": "+$4 and +7h for 750k"
+      "current_plan": "600k, running; a 150k continuation is planned as an option after this run rather than a restart",
+      "cost_delta": "+$4 and +7h for 750k",
+      "status": "MECHANISM CONFIRMED, EXACT HISTORY UNRESOLVED",
+      "verified_mechanism": "num_epochs is computed from num_steps alone and ignores resume_step, so on a resume num_steps acts as ADDITIONAL steps on top of the resumed position. A prior run reaching ~150k, resumed with num_steps=600000, would run 600161 further steps and land at ~750161 - producing a checkpoint named model000750000.pt. This is arithmetically consistent with the reference.",
+      "unresolved_caveat": "The reference args.json records resume_checkpoint as empty string, which is inconsistent with that specific history. args.json is rewritten unconditionally on every launch (train_mdm.py:33-35, no resume guard), so a resuming launch WOULD have recorded its resume path. The mechanism is confirmed; the reference's exact training history is not.",
+      "practical_consequence": "Our run is a genuine from-scratch 600161 steps. If we later want to match 750k, resume from the final checkpoint with num_steps=150000, which will add ~150136 steps."
     },
     {
       "id": 2,
