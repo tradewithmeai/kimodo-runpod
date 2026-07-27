@@ -1,0 +1,36 @@
+# Secrets — RunPod API key lives here
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+
+# Model weights, datasets, checkpoints — these live on the network volume, not in git
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.onnx
+weights/
+checkpoints/
+data/
+outputs/
+
+# Motion artefacts
+*.bvh
+*.fbx
+*.npz
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
