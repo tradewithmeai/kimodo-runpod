@@ -41,6 +41,32 @@ Re-check stock any time:
 node scripts/gpu-availability.mjs EU-RO-1 EUR-IS-1
 ```
 
+## SSH
+
+A dedicated key was generated for RunPod rather than reusing an existing one, so revoking
+it never affects the Hetzner / Hostinger / stratbot hosts.
+
+| Field | Value |
+|---|---|
+| Private key | `~/.ssh/id_ed25519_runpod` |
+| Comment | `runpod-kimodo-2026-07-27` |
+| Passphrase | none |
+| Registered | account-wide (`updateUserSettings.pubKey`), applies to every pod |
+
+`~/.ssh/config` has an `ssh.runpod.io` block pinning that key with `IdentitiesOnly yes`.
+That flag matters here: there are eight keys in `~/.ssh`, and without it SSH offers them
+one by one and can hit "too many authentication failures" before reaching the right one.
+
+Connect via the proxy once a pod exists:
+
+```bash
+ssh <podid>-<hash>@ssh.runpod.io
+```
+
+The account key is injected into pods at **creation** time. Registering a new key later
+does not retrofit into already-running pods — recreate the pod, or add the key to
+`~/.ssh/authorized_keys` inside it manually.
+
 ## API notes
 
 - REST base: `https://rest.runpod.io/v1` — works for `pods`, `networkvolumes`, `endpoints`.
