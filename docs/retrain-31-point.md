@@ -1,11 +1,22 @@
-# Retraining to a 31-point skeleton
+# Retraining to a 31-point skeleton — READY FOR SKELATOR UPGRADES
+
+> **STATUS: READY FOR SKELATOR UPGRADES.**
+> This document is **context held in advance**, not a task list. Nothing here is to be
+> acted on until the Skelator skeleton and the owned dataset are ready. Its purpose is
+> that when that moment comes, the technical implications are already worked out and
+> verified rather than being rediscovered under time pressure.
+>
+> **Trigger to act:** Skelator skeleton finalised + own dataset available.
+> **What is needed at that point:** bone names and hierarchy (for kinematic chains, joint
+> ordering, foot-contact indices), and the dataset's form and scale (captured / video-derived
+> / authored — determines the caption pipeline).
 
 Direction set 2026-07-27: the current 600k-step run is a **baseline only**. Production
-weights will be retrained for (a) a 31-joint anatomically correct skeleton and (b) a
-caption distribution matched to the LLM API front end. Neither the baseline weights nor
-its 22-joint representation ship.
+weights will be a **full retrain from scratch on our own dataset and our own anatomically
+correct Skelator skeleton** — no AMASS, no SMPL, no HumanML3D in the shipped artefact.
+Neither the baseline weights nor its 22-joint representation ship.
 
-This changes the technical plan and — more importantly — improves the licensing position.
+This changes the technical plan and — decisively — resolves the licensing position.
 
 ---
 
@@ -88,8 +99,8 @@ this — but only if the *motion data* changes, not merely the skeleton.
 |---|---|---|
 | Retarget HumanML3D motions to 31 joints, train on those | Still AMASS-derived | **No** — retargeting is a transformation of the same data |
 | Warm-start from baseline weights, train on new data | Weights derive from AMASS training | **Contested** — arguably a derivative work |
-| Train from scratch on your own captured/licensed motion | Yours | **Yes** |
-| Train from scratch on video-derived motion from footage you own or licence | Yours | **Yes** |
+| **Train from scratch on own dataset + Skelator skeleton** | **Yours** | **Yes — this is the chosen path** |
+| Train from scratch on video-derived motion from footage you own or licence | Yours | Yes |
 
 **The trap: changing the skeleton does not launder the data.** A 31-joint retarget of an
 AMASS motion is still that AMASS motion, expressed differently. Only replacing the source
