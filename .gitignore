@@ -34,3 +34,7 @@ outputs/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Local install artifacts (machine-specific)
+local/venv/
+local/motion-diffusion-model/

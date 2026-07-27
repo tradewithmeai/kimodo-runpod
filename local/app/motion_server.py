@@ -27,6 +27,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+# One file serves both deployments: pod (default path) and local Windows
+# (set MDM_REPO to the local clone).
 REPO = Path(os.environ.get('MDM_REPO', '/workspace/repos/motion-diffusion-model'))
 # Resolve before chdir — MDM resolves some asset paths relative to its own repo root,
 # so we move there, which would otherwise strand a relative path to viewer.html.
@@ -141,6 +143,24 @@ class MotionModel:
                   f'contains non-tensor objects. Falling back to unsafe load.', flush=True)
             state = torch.load(model_path, map_location='cpu', weights_only=False)
         load_model_wo_clip(self.model, state)
+        # CLIP's image tower (87.8M params, 58% of CLIP) is never called during text-to-
+        # motion sampling — verified with forward hooks on all 113 visual submodules over a
+        # full generate (research/probe-conditioning-path.md). Replacing it cuts peak VRAM
+        # 435 -> ~261 MB with bit-identical output. It cannot simply be deleted: CLIP's
+        # `.dtype` property reads `visual.conv1.weight.dtype`, so encode_text needs a stub
+        # that keeps exactly that attribute chain alive (one weight instead of 87.8M).
+        clip = self.model.clip_model
+        if hasattr(clip, 'visual') and clip.visual.__class__.__name__ != '_VisualStub':
+            visual_dtype = clip.dtype
+
+            class _VisualStub(torch.nn.Module):
+                def __init__(self, dtype):
+                    super().__init__()
+                    self.conv1 = torch.nn.Conv2d(1, 1, 1).to(dtype)
+
+            del clip.visual
+            clip.visual = _VisualStub(visual_dtype)
+
         # MDM overrides _apply without returning, so nn.Module.to() yields None here.
         # Upstream generate.py never chains these calls either — don't chain.
         self.model.to(device)
@@ -148,7 +168,15 @@ class MotionModel:
 
         # Normalisation stats that inv_transform would otherwise pull off the dataset.
         self.mean = np.load(REPO / 'dataset' / 't2m_mean.npy')
-        self.std = np.load(REPO / 'dataset' / 't2m_std.npy')
+        self.std = np.load(REPO / 'dataset' / 't2m_std.npy').copy()
+        # The bundled t2m_std.npy is the T2M *evaluator's* std, whose root-linear-velocity
+        # group (channels 1:3) is scaled ~24x smaller than the generator's true std. Decoded
+        # as-is, every clip treadmills: ~1 m of constant drift regardless of prompt instead
+        # of real travel. 24.0 was calibrated empirically by minimising stance-foot slip
+        # across walk/run/stand/backwards/empty prompts (research/verify-alternative-
+        # explanation.md): slip 0.0337->0.0045 m/frame, "stands still" drift 0.99->0.01 m,
+        # "walks forward" travel 1.19->4.78 m over 6 s.
+        self.std[1:3] *= 24.0
 
         self._cfg_model = ClassifierFreeSampleModel(self.model)
         self._cfg_model.to(device)

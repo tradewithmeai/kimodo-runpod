@@ -27,7 +27,9 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-REPO = Path('/workspace/repos/motion-diffusion-model')
+# One file serves both deployments: pod (default path) and local Windows
+# (set MDM_REPO to the local clone).
+REPO = Path(os.environ.get('MDM_REPO', '/workspace/repos/motion-diffusion-model'))
 # Resolve before chdir — MDM resolves some asset paths relative to its own repo root,
 # so we move there, which would otherwise strand a relative path to viewer.html.
 HERE = Path(__file__).resolve().parent
