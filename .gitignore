@@ -38,3 +38,4 @@ desktop.ini
 # Local install artifacts (machine-specific)
 local/venv/
 local/motion-diffusion-model/
+local/server.log
