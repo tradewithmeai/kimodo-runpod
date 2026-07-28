@@ -40,3 +40,7 @@ local/venv/
 local/motion-diffusion-model/
 local/server.log
 local/ngrok.log
+
+# SaaS runtime artifacts
+saas/data/
+saas/.env
